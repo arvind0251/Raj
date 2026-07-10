@@ -348,13 +348,13 @@ async def handle_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Message khali nahi ho sakta.")
         return WAITING_BROADCAST
 
-    all_users = list(users.find({}, {"_id": 1}))
+    all_users = list(users.find({"user_id": {"$exists": True, "$ne": None}}, {"user_id": 1}))
     sent = failed = 0
     status = await update.message.reply_text(f"📤 {len(all_users)} users ko bhej raha hoon…")
 
     for doc in all_users:
         try:
-            await ctx.bot.send_message(doc["_id"], text)
+            await ctx.bot.send_message(doc["user_id"], text)
             sent += 1
         except Exception:
             failed += 1
