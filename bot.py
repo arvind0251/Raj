@@ -38,6 +38,7 @@ API_KEY = os.getenv("API_KEY", "Smoke")
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "telegram_bot")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "10"))
+SHARE_REWARD = int(os.getenv("SHARE_REWARD", "5"))  # Extra limit for sharing
 
 # Debug information
 print("=" * 60)
@@ -47,7 +48,7 @@ print(f"✅ BOT_TOKEN: {'SET' if BOT_TOKEN else '❌ MISSING'}")
 print(f"✅ MONGO_URI: {'SET' if MONGO_URI else '❌ MISSING'}")
 print(f"✅ OWNER_ID: {OWNER_ID}")
 print(f"✅ DAILY_LIMIT: {DAILY_LIMIT}")
-print(f"✅ API_URL: {API_URL}")
+print(f"✅ SHARE_REWARD: {SHARE_REWARD}")
 print("=" * 60)
 
 # Validate required variables
@@ -83,6 +84,7 @@ except Exception as e:
 # Constants for conversation states
 WAITING_INPUT = 1
 WAITING_BROADCAST = 2
+WAITING_SHARE_USERNAME = 3
 
 def today():
     """Get today's date in UTC"""
@@ -99,6 +101,8 @@ def register_user(user_id: int, username: str | None = None):
                     "first_seen": today(),
                     "count": 0,
                     "date": today(),
+                    "shared_count": 0,
+                    "bonus_limits": 0,  # Extra limits earned from sharing
                 },
                 "$set": {
                     "username": username,
@@ -127,18 +131,33 @@ def can_use(user_id: int) -> bool:
                     "count": 1,
                     "first_seen": today(),
                     "last_seen": today(),
+                    "shared_count": 0,
+                    "bonus_limits": 0,
                 }
             )
             return True
 
+        # Reset daily count if new day
         if data.get("date") != today():
             users.update_one(
                 {"_id": user_id},
-                {"$set": {"date": today(), "count": 1, "last_seen": today()}}
+                {
+                    "$set": {
+                        "date": today(), 
+                        "count": 1, 
+                        "last_seen": today(),
+                        # Don't reset bonus_limits, they carry over
+                    }
+                }
             )
             return True
 
-        if data.get("count", 0) >= DAILY_LIMIT:
+        # Check if user has bonus limits (from sharing)
+        bonus_limits = data.get("bonus_limits", 0)
+        daily_count = data.get("count", 0)
+        
+        # Check if used all daily + bonus limits
+        if daily_count >= (DAILY_LIMIT + bonus_limits):
             return False
 
         users.update_one(
@@ -156,12 +175,52 @@ def remaining_uses(user_id: int) -> int:
         return 9999
     try:
         data = users.find_one({"_id": user_id})
-        if not data or data.get("date") != today():
+        if not data:
             return DAILY_LIMIT
-        return max(0, DAILY_LIMIT - data.get("count", 0))
+        
+        bonus_limits = data.get("bonus_limits", 0)
+        daily_count = data.get("count", 0)
+        
+        # If new day, reset count but keep bonus
+        if data.get("date") != today():
+            return DAILY_LIMIT + bonus_limits
+            
+        return max(0, (DAILY_LIMIT + bonus_limits) - daily_count)
     except Exception as e:
         logger.error(f"Error getting remaining uses for {user_id}: {e}")
         return 0
+
+def get_total_limits(user_id: int) -> int:
+    """Get total available limits for today (daily + bonus)"""
+    if user_id == OWNER_ID:
+        return 9999
+    try:
+        data = users.find_one({"_id": user_id})
+        if not data:
+            return DAILY_LIMIT
+        bonus_limits = data.get("bonus_limits", 0)
+        return DAILY_LIMIT + bonus_limits
+    except Exception as e:
+        logger.error(f"Error getting total limits for {user_id}: {e}")
+        return DAILY_LIMIT
+
+def add_bonus_limits(user_id: int, amount: int) -> bool:
+    """Add bonus limits to user (from sharing)"""
+    try:
+        result = users.update_one(
+            {"_id": user_id},
+            {
+                "$inc": {
+                    "bonus_limits": amount,
+                    "shared_count": 1
+                },
+                "$set": {"last_seen": today()}
+            }
+        )
+        return result.modified_count > 0
+    except Exception as e:
+        logger.error(f"Error adding bonus limits to {user_id}: {e}")
+        return False
 
 def lookup(query: str):
     """Query the API"""
@@ -186,16 +245,27 @@ def format_result(result):
     return str(result)
 
 def home_menu(is_owner: bool = False):
-    """Create home menu keyboard"""
-    rows = [
-        [InlineKeyboardButton("🔍 Search", callback_data="search"), 
-         InlineKeyboardButton("📊 Limit", callback_data="limit")],
-        [InlineKeyboardButton("❓ Help", callback_data="help"), 
-         InlineKeyboardButton("ℹ️ About", callback_data="about")],
-        [InlineKeyboardButton("📈 Stats", callback_data="stats")],
-    ]
+    """Create home menu keyboard - Stats only for owner"""
     if is_owner:
-        rows.insert(2, [InlineKeyboardButton("📢 Broadcast", callback_data="broadcast")])
+        # Owner menu with Stats and Broadcast
+        rows = [
+            [InlineKeyboardButton("🔍 Search", callback_data="search"), 
+             InlineKeyboardButton("📊 Limit", callback_data="limit")],
+            [InlineKeyboardButton("📢 Share & Earn", callback_data="share")],
+            [InlineKeyboardButton("📈 Stats", callback_data="stats"), 
+             InlineKeyboardButton("📢 Broadcast", callback_data="broadcast")],
+            [InlineKeyboardButton("❓ Help", callback_data="help"), 
+             InlineKeyboardButton("ℹ️ About", callback_data="about")],
+        ]
+    else:
+        # Normal user menu - No Stats button
+        rows = [
+            [InlineKeyboardButton("🔍 Search", callback_data="search"), 
+             InlineKeyboardButton("📊 Limit", callback_data="limit")],
+            [InlineKeyboardButton("📢 Share & Earn", callback_data="share")],
+            [InlineKeyboardButton("❓ Help", callback_data="help"), 
+             InlineKeyboardButton("ℹ️ About", callback_data="about")],
+        ]
     return InlineKeyboardMarkup(rows)
 
 def back_menu():
@@ -229,27 +299,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     register_user(u.id, u.username)
     remaining = remaining_uses(u.id) if u.id != OWNER_ID else '♾️ Unlimited'
+    total = get_total_limits(u.id) if u.id != OWNER_ID else '♾️ Unlimited'
     
     text = (
         f"👋 Hello, {u.first_name}!\n\n"
         f"📋 Daily limit: {DAILY_LIMIT} uses\n"
+        f"🎁 Bonus limits: {get_total_limits(u.id) - DAILY_LIMIT if u.id != OWNER_ID else 0}\n"
+        f"📊 Total available: {total}\n"
         f"✅ Remaining today: {remaining}\n\n"
+        f"💡 Share this bot with friends to earn {SHARE_REWARD} extra limits per share!\n\n"
         f"Use the buttons below to get started."
     )
     await update.message.reply_text(text, reply_markup=home_menu(u.id == OWNER_ID))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
+    uid = update.effective_user.id
+    is_owner = uid == OWNER_ID
+    
     text = (
         "❓ Help\n\n"
         "• 🔍 Search - Look up information\n"
         "• 📊 Limit - Check remaining uses\n"
-        "• 📈 Stats - View bot statistics\n"
+        "• 📢 Share & Earn - Share bot and earn extra limits\n"
         "• ℹ️ About - About this bot\n"
-        "• 📢 Broadcast - Send message to all users (Owner only)\n"
-        "• 🔙 Back - Go back to home\n"
-        "• ❌ Cancel - Cancel current operation"
     )
+    
+    if is_owner:
+        text += "• 📈 Stats - View bot statistics (Owner only)\n"
+        text += "• 📢 Broadcast - Send message to all users (Owner only)\n"
+    
+    text += "• 🔙 Back - Go back to home\n"
+    text += "• ❌ Cancel - Cancel current operation\n\n"
+    text += f"💰 Earn {SHARE_REWARD} extra limits for each friend who joins!"
+    
     if update.message:
         await update.message.reply_text(text, reply_markup=back_menu())
     else:
@@ -262,9 +345,10 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 Telegram Bot with:\n"
         "• MongoDB database\n"
         "• Daily usage limits\n"
-        "• Broadcast feature\n"
+        "• Share & Earn rewards\n"
         "• User statistics\n"
         "• Interactive buttons\n\n"
+        f"💰 Share Reward: {SHARE_REWARD} extra limits per share\n\n"
         "Made with ❤️ using python-telegram-bot"
     )
     if update.message:
@@ -278,7 +362,16 @@ async def limit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid == OWNER_ID:
         text = "👑 Owner has unlimited usage."
     else:
-        text = f"📊 Remaining uses today: {remaining_uses(uid)}"
+        remaining = remaining_uses(uid)
+        total = get_total_limits(uid)
+        bonus = total - DAILY_LIMIT
+        text = (
+            f"📊 Usage Details\n\n"
+            f"📋 Daily limit: {DAILY_LIMIT}\n"
+            f"🎁 Bonus limits: {bonus}\n"
+            f"📊 Total available: {total}\n"
+            f"✅ Remaining today: {remaining}"
+        )
     
     if update.message:
         await update.message.reply_text(text, reply_markup=back_menu())
@@ -286,32 +379,149 @@ async def limit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(text, reply_markup=back_menu())
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /stats command"""
+    """Handle /stats command - Only for owner"""
     uid = update.effective_user.id
+    
+    # Check if user is owner
+    if uid != OWNER_ID:
+        if update.message:
+            await update.message.reply_text(
+                "❌ This command is only available to the bot owner.",
+                reply_markup=home_menu(False)
+            )
+        else:
+            await update.callback_query.message.reply_text(
+                "❌ This command is only available to the bot owner.",
+                reply_markup=home_menu(False)
+            )
+        return
+    
     try:
         total_users = users.count_documents({})
         active_today = users.count_documents({"date": today()})
         limit_hit = users.count_documents({"date": today(), "count": {"$gte": DAILY_LIMIT}})
+        total_shares = users.count_documents({"shared_count": {"$gt": 0}})
+        total_bonus_given = users.aggregate([
+            {"$group": {"_id": None, "total": {"$sum": "$bonus_limits"}}}
+        ])
+        total_bonus = next(total_bonus_given, {}).get("total", 0)
         
         text = (
-            "📈 Statistics\n\n"
+            "📈 Statistics (Owner Only)\n\n"
             f"👥 Total users: {total_users}\n"
             f"✅ Active today: {active_today}\n"
             f"⚠️ Users at limit: {limit_hit}\n"
-            f"📊 Your remaining: {remaining_uses(uid) if uid != OWNER_ID else '♾️ Unlimited'}"
+            f"🔄 Total shares: {total_shares}\n"
+            f"🎁 Total bonus given: {total_bonus}\n"
+            f"📊 Daily limit: {DAILY_LIMIT}\n"
+            f"💰 Share reward: {SHARE_REWARD}"
         )
         
         if update.message:
-            await update.message.reply_text(text, reply_markup=back_menu())
+            await update.message.reply_text(text, reply_markup=home_menu(True))
         else:
-            await update.callback_query.message.reply_text(text, reply_markup=back_menu())
+            await update.callback_query.message.reply_text(text, reply_markup=home_menu(True))
     except Exception as e:
         logger.error(f"Error in stats: {e}")
         error_text = "❌ Error fetching statistics. Please try again."
         if update.message:
-            await update.message.reply_text(error_text, reply_markup=back_menu())
+            await update.message.reply_text(error_text, reply_markup=home_menu(True))
         else:
-            await update.callback_query.message.reply_text(error_text, reply_markup=back_menu())
+            await update.callback_query.message.reply_text(error_text, reply_markup=home_menu(True))
+
+async def share_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle share button - generate share link"""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    
+    # Get bot username
+    bot_info = await context.bot.get_me()
+    bot_username = bot_info.username
+    
+    # Create share link
+    share_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+    
+    text = (
+        "📢 Share & Earn\n\n"
+        f"Share this bot with your friends and earn {SHARE_REWARD} extra limits for each friend who joins!\n\n"
+        f"🔗 Your share link:\n"
+        f"`{share_link}`\n\n"
+        "📋 How it works:\n"
+        "1. Share the link with your friends\n"
+        "2. When they join using your link, you get extra limits\n"
+        "3. Your bonus limits will be added automatically\n\n"
+        f"💰 Current bonus: {get_total_limits(uid) - DAILY_LIMIT} extra limits\n"
+        f"📊 Total available: {get_total_limits(uid)}\n\n"
+        "👆 Tap the link above to copy it!"
+    )
+    
+    await q.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Copy Link", callback_data="copy_link")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")]
+        ]),
+        parse_mode='Markdown'
+    )
+
+async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle referral when user starts with ref parameter"""
+    u = update.effective_user
+    if not u:
+        return
+    
+    # Check if this is a referral
+    if context.args and len(context.args) > 0:
+        ref_arg = context.args[0]
+        if ref_arg.startswith("ref_"):
+            try:
+                referrer_id = int(ref_arg.replace("ref_", ""))
+                
+                # Don't allow self-referral
+                if referrer_id == u.id:
+                    await update.message.reply_text(
+                        "❌ You cannot refer yourself!",
+                        reply_markup=home_menu(u.id == OWNER_ID)
+                    )
+                    return
+                
+                # Register the new user first
+                register_user(u.id, u.username)
+                
+                # Add bonus to referrer
+                if add_bonus_limits(referrer_id, SHARE_REWARD):
+                    # Notify referrer
+                    try:
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=f"🎉 Great news! Someone joined using your referral link!\n\n"
+                                 f"💰 You earned {SHARE_REWARD} extra limits!\n"
+                                 f"📊 Your total available limits: {get_total_limits(referrer_id)}\n\n"
+                                 f"Keep sharing to earn more! 🚀"
+                        )
+                    except Exception as e:
+                        logger.error(f"Could not notify referrer {referrer_id}: {e}")
+                    
+                    # Notify new user about the reward
+                    text = (
+                        f"👋 Welcome {u.first_name}!\n\n"
+                        f"✅ You've been successfully registered!\n"
+                        f"🎁 Your referrer earned {SHARE_REWARD} extra limits.\n\n"
+                        f"📋 Daily limit: {DAILY_LIMIT} uses\n"
+                        f"✅ Remaining today: {remaining_uses(u.id)}\n\n"
+                        f"💡 You can also share this bot and earn extra limits!\n\n"
+                        f"Use the buttons below to get started."
+                    )
+                    await update.message.reply_text(text, reply_markup=home_menu(u.id == OWNER_ID))
+                    return
+                else:
+                    logger.error(f"Failed to add bonus to referrer {referrer_id}")
+            except ValueError:
+                logger.error(f"Invalid referrer ID in referral: {ref_arg}")
+    
+    # Normal start (no referral or invalid referral)
+    await start(update, context)
 
 # Conversation Handlers for Search
 async def search_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -339,8 +549,11 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_INPUT
 
     if not can_use(u.id):
+        remaining = remaining_uses(u.id)
         await update.message.reply_text(
-            "❌ Daily limit reached. Try again tomorrow.",
+            f"❌ Daily limit reached.\n\n"
+            f"📊 Remaining today: {remaining}\n"
+            f"💡 Share this bot to earn extra limits!",
             reply_markup=home_menu(u.id == OWNER_ID)
         )
         return ConversationHandler.END
@@ -355,6 +568,14 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = text[:3900] + "\n\n... (truncated)"
         
         await msg.edit_text(text, reply_markup=result_menu())
+        
+        # Show remaining uses after search
+        remaining = remaining_uses(u.id)
+        if remaining > 0:
+            await update.message.reply_text(
+                f"✅ Remaining uses today: {remaining}",
+                reply_markup=result_menu()
+            )
     except Exception as e:
         logger.error(f"Error in handle_query: {e}")
         await update.message.reply_text(
@@ -444,69 +665,119 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     return ConversationHandler.END
 
+async def copy_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle copy link callback"""
+    q = update.callback_query
+    await q.answer("📋 Link copied to clipboard! Share it with your friends.", show_alert=True)
+
 # Button Router
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all callback queries"""
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
+    is_owner = uid == OWNER_ID
 
     if q.data == "help":
-        await q.message.reply_text(
+        text = (
             "❓ Help\n\n"
             "• 🔍 Search - Look up information\n"
             "• 📊 Limit - Check remaining uses\n"
-            "• 📈 Stats - View bot statistics\n"
+            "• 📢 Share & Earn - Share bot and earn extra limits\n"
             "• ℹ️ About - About this bot\n"
-            "• 📢 Broadcast - Send message to all users (Owner only)\n"
-            "• 🔙 Back - Go back to home\n"
-            "• ❌ Cancel - Cancel current operation",
-            reply_markup=back_menu()
         )
+        if is_owner:
+            text += "• 📈 Stats - View bot statistics (Owner only)\n"
+            text += "• 📢 Broadcast - Send message to all users (Owner only)\n"
+        text += "• 🔙 Back - Go back to home\n"
+        text += "• ❌ Cancel - Cancel current operation\n\n"
+        text += f"💰 Earn {SHARE_REWARD} extra limits for each friend who joins!"
+        
+        await q.message.reply_text(text, reply_markup=back_menu())
+    
     elif q.data == "limit":
         if uid == OWNER_ID:
             text = "👑 Owner has unlimited usage."
         else:
-            text = f"📊 Remaining uses today: {remaining_uses(uid)}"
+            remaining = remaining_uses(uid)
+            total = get_total_limits(uid)
+            bonus = total - DAILY_LIMIT
+            text = (
+                f"📊 Usage Details\n\n"
+                f"📋 Daily limit: {DAILY_LIMIT}\n"
+                f"🎁 Bonus limits: {bonus}\n"
+                f"📊 Total available: {total}\n"
+                f"✅ Remaining today: {remaining}"
+            )
         await q.message.reply_text(text, reply_markup=back_menu())
+    
     elif q.data == "stats":
+        # Only owner can access stats
+        if not is_owner:
+            await q.message.reply_text(
+                "❌ This feature is only available to the bot owner.",
+                reply_markup=home_menu(False)
+            )
+            return
+        
         try:
             total_users = users.count_documents({})
             active_today = users.count_documents({"date": today()})
             limit_hit = users.count_documents({"date": today(), "count": {"$gte": DAILY_LIMIT}})
+            total_shares = users.count_documents({"shared_count": {"$gt": 0}})
+            total_bonus_given = users.aggregate([
+                {"$group": {"_id": None, "total": {"$sum": "$bonus_limits"}}}
+            ])
+            total_bonus = next(total_bonus_given, {}).get("total", 0)
+            
             text = (
-                "📈 Statistics\n\n"
+                "📈 Statistics (Owner Only)\n\n"
                 f"👥 Total users: {total_users}\n"
                 f"✅ Active today: {active_today}\n"
                 f"⚠️ Users at limit: {limit_hit}\n"
-                f"📊 Your remaining: {remaining_uses(uid) if uid != OWNER_ID else '♾️ Unlimited'}"
+                f"🔄 Total shares: {total_shares}\n"
+                f"🎁 Total bonus given: {total_bonus}\n"
+                f"📊 Daily limit: {DAILY_LIMIT}\n"
+                f"💰 Share reward: {SHARE_REWARD}"
             )
-            await q.message.reply_text(text, reply_markup=back_menu())
+            await q.message.reply_text(text, reply_markup=home_menu(True))
         except Exception as e:
             logger.error(f"Error in stats callback: {e}")
             await q.message.reply_text(
                 "❌ Error fetching statistics.",
-                reply_markup=back_menu()
+                reply_markup=home_menu(True)
             )
+    
     elif q.data == "about":
         await q.message.reply_text(
             "ℹ️ About\n\n"
             "🤖 Telegram Bot with:\n"
             "• MongoDB database\n"
             "• Daily usage limits\n"
-            "• Broadcast feature\n"
+            "• Share & Earn rewards\n"
             "• User statistics\n"
             "• Interactive buttons\n\n"
+            f"💰 Share Reward: {SHARE_REWARD} extra limits per share\n\n"
             "Made with ❤️ using python-telegram-bot",
             reply_markup=back_menu()
         )
+    
+    elif q.data == "share":
+        await share_entry(update, context)
+    
+    elif q.data == "copy_link":
+        await copy_link_callback(update, context)
+    
     elif q.data == "back":
         remaining = remaining_uses(uid) if uid != OWNER_ID else '♾️ Unlimited'
+        total = get_total_limits(uid) if uid != OWNER_ID else '♾️ Unlimited'
         await q.message.reply_text(
             f"🏠 Home Menu\n\n"
+            f"📊 Total limits: {total}\n"
             f"✅ Remaining today: {remaining}",
             reply_markup=home_menu(uid == OWNER_ID)
         )
+    
     elif q.data == "cancel":
         await q.message.reply_text(
             "❌ Cancelled.",
@@ -536,7 +807,7 @@ def main():
         print("✅ Bot application created successfully!")
         
         # Command handlers
-        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("start", handle_referral))
         app.add_handler(CommandHandler("help", help_cmd))
         app.add_handler(CommandHandler("limit", limit_cmd))
         app.add_handler(CommandHandler("stats", stats_cmd))
