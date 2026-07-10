@@ -122,8 +122,7 @@ def format_result(result):
             return f"Error: {result['error']}"
         if "result" in result:
             return str(result["result"])
-        return "
-".join([f"{k}: {v}" for k, v in result.items()])
+        return "\n".join([f"{k}: {v}" for k, v in result.items()])
     return str(result)
 
 def home_menu(is_owner: bool = False):
@@ -156,28 +155,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     register_user(u.id, u.username)
     text = (
-        f"Hello, {u.first_name}.
-
-"
-        f"Daily limit: {DAILY_LIMIT} uses.
-"
+        f"Hello, {u.first_name}.\n\n"
+        f"Daily limit: {DAILY_LIMIT} uses.\n"
         f"Remaining today: {remaining_uses(u.id) if u.id != OWNER_ID else 'Unlimited'}"
     )
     await update.message.reply_text(text, reply_markup=home_menu(u.id == OWNER_ID))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Help:
-
-Search, Limit, Stats, About, Broadcast, Back, Cancel."
+    text = "Help:\n\nSearch, Limit, Stats, About, Broadcast, Back, Cancel."
     if update.message:
         await update.message.reply_text(text, reply_markup=back_menu())
     else:
         await update.callback_query.message.reply_text(text, reply_markup=back_menu())
 
 async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "About:
-
-Polished UI bot with MongoDB, daily limit, broadcast, and stats."
+    text = "About:\n\nPolished UI bot with MongoDB, daily limit, broadcast, and stats."
     if update.message:
         await update.message.reply_text(text, reply_markup=back_menu())
     else:
@@ -197,15 +189,10 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_today = users.count_documents({"date": today()})
     limit_hit = users.count_documents({"date": today(), "count": {"$gte": DAILY_LIMIT}})
     text = (
-        "Stats:
-
-"
-        f"Total users: {total_users}
-"
-        f"Active today: {active_today}
-"
-        f"Users at limit: {limit_hit}
-"
+        "Stats:\n\n"
+        f"Total users: {total_users}\n"
+        f"Active today: {active_today}\n"
+        f"Users at limit: {limit_hit}\n"
         f"Your remaining: {remaining_uses(uid) if uid != OWNER_ID else 'Unlimited'}"
     )
     if update.message:
@@ -273,13 +260,14 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=doc["_id"], text=text)
             sent += 1
-        except Exception:
+            # Add small delay to avoid rate limiting
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Failed to send to {doc['_id']}: {e}")
             failed += 1
 
     await status.edit_text(
-        f"Broadcast complete.
-Sent: {sent}
-Failed: {failed}",
+        f"Broadcast complete.\nSent: {sent}\nFailed: {failed}",
         reply_markup=home_menu(True)
     )
     return ConversationHandler.END
@@ -290,10 +278,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Cancelled.",
             reply_markup=home_menu(update.effective_user.id == OWNER_ID)
         )
-    else:
+    elif update.callback_query:
         await update.callback_query.message.reply_text(
             "Cancelled.",
-            reply_markup=home_menu(update.effective_user.id == OWNER_ID)
+            reply_markup=home_menu(update.callback_query.from_user.id == OWNER_ID)
         )
     return ConversationHandler.END
 
@@ -304,9 +292,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "help":
         await q.message.reply_text(
-            "Help:
-
-Search, Limit, Stats, About, Broadcast, Back, Cancel.",
+            "Help:\n\nSearch, Limit, Stats, About, Broadcast, Back, Cancel.",
             reply_markup=back_menu()
         )
     elif q.data == "limit":
@@ -317,29 +303,21 @@ Search, Limit, Stats, About, Broadcast, Back, Cancel.",
         active_today = users.count_documents({"date": today()})
         limit_hit = users.count_documents({"date": today(), "count": {"$gte": DAILY_LIMIT}})
         text = (
-            "Stats:
-
-"
-            f"Total users: {total_users}
-"
-            f"Active today: {active_today}
-"
-            f"Users at limit: {limit_hit}
-"
+            "Stats:\n\n"
+            f"Total users: {total_users}\n"
+            f"Active today: {active_today}\n"
+            f"Users at limit: {limit_hit}\n"
             f"Your remaining: {remaining_uses(uid) if uid != OWNER_ID else 'Unlimited'}"
         )
         await q.message.reply_text(text, reply_markup=back_menu())
     elif q.data == "about":
         await q.message.reply_text(
-            "About:
-
-Polished UI bot with MongoDB, daily limit, broadcast, and stats.",
+            "About:\n\nPolished UI bot with MongoDB, daily limit, broadcast, and stats.",
             reply_markup=back_menu()
         )
     elif q.data == "back":
         await q.message.reply_text(
-            f"Home menu.
-Remaining today: {remaining_uses(uid) if uid != OWNER_ID else 'Unlimited'}",
+            f"Home menu.\nRemaining today: {remaining_uses(uid) if uid != OWNER_ID else 'Unlimited'}",
             reply_markup=home_menu(uid == OWNER_ID)
         )
     elif q.data == "cancel":
