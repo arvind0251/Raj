@@ -76,13 +76,19 @@ def can_use(user_id: int) -> bool:
         return True
 
     if data.get("date") != today():
-        users.update_one({"_id": user_id}, {"$set": {"date": today(), "count": 1, "last_seen": today()}})
+        users.update_one(
+            {"_id": user_id},
+            {"$set": {"date": today(), "count": 1, "last_seen": today()}}
+        )
         return True
 
     if data.get("count", 0) >= DAILY_LIMIT:
         return False
 
-    users.update_one({"_id": user_id}, {"$inc": {"count": 1}, "$set": {"last_seen": today()}})
+    users.update_one(
+        {"_id": user_id},
+        {"$inc": {"count": 1}, "$set": {"last_seen": today()}}
+    )
     return True
 
 def remaining_uses(user_id: int) -> int:
@@ -143,10 +149,14 @@ def broadcast_menu():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     register_user(u.id, u.username)
-    text = f"Hello, {u.first_name}.
+    text = (
+        f"Hello, {u.first_name}.
 
-Daily limit: {DAILY_LIMIT} uses.
-Remaining today: {remaining_uses(u.id) if u.id != OWNER_ID else 'Unlimited'}"
+"
+        f"Daily limit: {DAILY_LIMIT} uses.
+"
+        f"Remaining today: {remaining_uses(u.id) if u.id != OWNER_ID else 'Unlimited'}"
+    )
     await update.message.reply_text(text, reply_markup=home_menu(u.id == OWNER_ID))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -213,7 +223,10 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_INPUT
 
     if not can_use(u.id):
-        await update.message.reply_text("Daily limit reached. Try again tomorrow.", reply_markup=home_menu(u.id == OWNER_ID))
+        await update.message.reply_text(
+            "Daily limit reached. Try again tomorrow.",
+            reply_markup=home_menu(u.id == OWNER_ID)
+        )
         return ConversationHandler.END
 
     msg = await update.message.reply_text("Searching...")
@@ -253,16 +266,25 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             failed += 1
 
-    await status.edit_text(f"Broadcast complete.
+    await status.edit_text(
+        f"Broadcast complete.
 Sent: {sent}
-Failed: {failed}", reply_markup=home_menu(True))
+Failed: {failed}",
+        reply_markup=home_menu(True)
+    )
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
-        await update.message.reply_text("Cancelled.", reply_markup=home_menu(update.effective_user.id == OWNER_ID))
+        await update.message.reply_text(
+            "Cancelled.",
+            reply_markup=home_menu(update.effective_user.id == OWNER_ID)
+        )
     else:
-        await update.callback_query.message.reply_text("Cancelled.", reply_markup=home_menu(update.effective_user.id == OWNER_ID))
+        await update.callback_query.message.reply_text(
+            "Cancelled.",
+            reply_markup=home_menu(update.effective_user.id == OWNER_ID)
+        )
     return ConversationHandler.END
 
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -271,9 +293,12 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
 
     if q.data == "help":
-        await q.message.reply_text("Help:
+        await q.message.reply_text(
+            "Help:
 
-Search, Limit, Stats, About, Broadcast, Back, Cancel.", reply_markup=back_menu())
+Search, Limit, Stats, About, Broadcast, Back, Cancel.",
+            reply_markup=back_menu()
+        )
     elif q.data == "limit":
         text = "Owner has unlimited usage." if uid == OWNER_ID else f"Remaining uses today: {remaining_uses(uid)}"
         await q.message.reply_text(text, reply_markup=back_menu())
@@ -295,12 +320,18 @@ Search, Limit, Stats, About, Broadcast, Back, Cancel.", reply_markup=back_menu()
         )
         await q.message.reply_text(text, reply_markup=back_menu())
     elif q.data == "about":
-        await q.message.reply_text("About:
+        await q.message.reply_text(
+            "About:
 
-Polished UI bot with MongoDB, daily limit, broadcast, and stats.", reply_markup=back_menu())
+Polished UI bot with MongoDB, daily limit, broadcast, and stats.",
+            reply_markup=back_menu()
+        )
     elif q.data == "back":
-        await q.message.reply_text(f"Home menu.
-Remaining today: {remaining_uses(uid) if uid != OWNER_ID else 'Unlimited'}", reply_markup=home_menu(uid == OWNER_ID))
+        await q.message.reply_text(
+            f"Home menu.
+Remaining today: {remaining_uses(uid) if uid != OWNER_ID else 'Unlimited'}",
+            reply_markup=home_menu(uid == OWNER_ID)
+        )
     elif q.data == "cancel":
         await q.message.reply_text("Cancelled.", reply_markup=home_menu(uid == OWNER_ID))
 
