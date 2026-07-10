@@ -77,13 +77,14 @@ def register_user(uid: int, username: str | None = None):
         {
             "$setOnInsert": {
                 "_id": uid,
+                "user_id": uid,
                 "first_seen": today(),
                 "count": 0,
                 "date": today(),
                 "shared_count": 0,
                 "bonus_limits": 0,
             },
-            "$set": {"username": username, "last_seen": today()},
+            "$set": {"username": username, "last_seen": today(), "user_id": uid},
         },
         upsert=True,
     )
