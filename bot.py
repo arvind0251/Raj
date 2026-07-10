@@ -20,17 +20,14 @@ from telegram.ext import (
 )
 from telegram.error import InvalidToken
 
-# Load environment variables
 load_dotenv()
 
-# Logging setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Get environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "7302427268"))
 API_URL = os.getenv("API_URL", "https://project-fawn-eight-95.vercel.app/tg2phone/api")
@@ -40,44 +37,19 @@ DB_NAME = os.getenv("DB_NAME", "telegram_bot")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "10"))
 SHARE_REWARD = int(os.getenv("SHARE_REWARD", "5"))
 
-# Debug information
-print("=" * 60)
-print("🤖 TELEGRAM BOT STARTING...")
-print("=" * 60)
-print(f"✅ BOT_TOKEN: {'SET' if BOT_TOKEN else '❌ MISSING'}")
-print(f"✅ MONGO_URI: {'SET' if MONGO_URI else '❌ MISSING'}")
-print(f"✅ API_URL: {API_URL}")
-print(f"✅ API_KEY: {API_KEY}")
-print(f"✅ OWNER_ID: {OWNER_ID}")
-print(f"✅ DAILY_LIMIT: {DAILY_LIMIT}")
-print(f"✅ SHARE_REWARD: {SHARE_REWARD}")
-print("=" * 60)
+if not BOT_TOKEN or not MONGO_URI:
+    raise RuntimeError("BOT_TOKEN and MONGO_URI must be set in .env")
 
-# Validate required variables
-if not BOT_TOKEN:
-    print("❌ ERROR: BOT_TOKEN is not set in .env file!")
-    sys.exit(1)
-
-if not MONGO_URI:
-    print("❌ ERROR: MONGO_URI is not set in .env file!")
-    sys.exit(1)
-
-# MongoDB Connection
 try:
-    print("🔄 Connecting to MongoDB...")
     mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     db = mongo[DB_NAME]
     users = db.users
     mongo.admin.command('ping')
-    print("✅ MongoDB connected successfully!")
-except ConnectionFailure as e:
-    print(f"❌ ERROR: MongoDB connection failed: {e}")
-    sys.exit(1)
+    print("✅ MongoDB connected!")
 except Exception as e:
-    print(f"❌ ERROR: MongoDB error: {e}")
+    print(f"❌ MongoDB error: {e}")
     sys.exit(1)
 
-# Constants for conversation states
 WAITING_INPUT = 1
 WAITING_BROADCAST = 2
 
@@ -129,6 +101,7 @@ def can_use(user_id: int) -> bool:
             )
             return True
 
+        # ✅ FIX: Agar naya din hai toh count reset karo
         if data.get("date") != today():
             users.update_one(
                 {"_id": user_id},
@@ -138,8 +111,10 @@ def can_use(user_id: int) -> bool:
 
         bonus_limits = data.get("bonus_limits", 0)
         daily_count = data.get("count", 0)
+        total_limit = DAILY_LIMIT + bonus_limits
         
-        if daily_count >= (DAILY_LIMIT + bonus_limits):
+        # ✅ FIX: Agar limit cross ho gayi toh false
+        if daily_count >= total_limit:
             return False
 
         users.update_one(
@@ -152,6 +127,7 @@ def can_use(user_id: int) -> bool:
         return False
 
 def remaining_uses(user_id: int) -> int:
+    """✅ FIXED: Get remaining uses for today"""
     if user_id == OWNER_ID:
         return 9999
     try:
@@ -161,11 +137,19 @@ def remaining_uses(user_id: int) -> int:
         
         bonus_limits = data.get("bonus_limits", 0)
         daily_count = data.get("count", 0)
+        current_date = data.get("date")
         
-        if data.get("date") != today():
+        # Agar naya din hai toh reset
+        if current_date != today():
             return DAILY_LIMIT + bonus_limits
-            
-        return max(0, (DAILY_LIMIT + bonus_limits) - daily_count)
+        
+        # ✅ FIX: Remaining = Total - Used
+        total_limit = DAILY_LIMIT + bonus_limits
+        remaining = total_limit - daily_count
+        
+        # ✅ FIX: Kabhi negative nahi dikhana
+        return max(0, remaining)
+        
     except Exception as e:
         logger.error(f"Error getting remaining uses for {user_id}: {e}")
         return 0
@@ -200,52 +184,29 @@ def add_bonus_limits(user_id: int, amount: int) -> bool:
         logger.error(f"Error adding bonus limits to {user_id}: {e}")
         return False
 
-# ========== API FUNCTIONS ==========
 def search_api(query: str):
-    """Search phone/email using API"""
     try:
-        print(f"🔄 Searching API for: {query}")
-        print(f"📡 API URL: {API_URL}")
-        print(f"🔑 API Key: {API_KEY}")
-        
         response = requests.get(
             API_URL,
             params={"key": API_KEY, "q": query},
             timeout=30
         )
-        
-        print(f"📊 Response Status: {response.status_code}")
-        print(f"📝 Response Text: {response.text[:200]}...")  # First 200 chars
-        
         response.raise_for_status()
-        
         try:
-            data = response.json()
-            print(f"✅ API Response: {data}")
-            return data
-        except ValueError as e:
-            print(f"❌ JSON Parse Error: {e}")
-            return {"ok": False, "error": "Invalid JSON response from API"}
-            
+            return response.json()
+        except ValueError:
+            return {"ok": False, "error": "Invalid JSON response"}
     except requests.exceptions.Timeout:
-        print("❌ API Timeout")
-        return {"ok": False, "error": "API request timeout. Please try again."}
-    except requests.exceptions.ConnectionError:
-        print("❌ API Connection Error")
-        return {"ok": False, "error": "Cannot connect to API. Please check your internet."}
+        return {"ok": False, "error": "API timeout"}
     except requests.exceptions.RequestException as e:
-        print(f"❌ API Request Error: {e}")
-        return {"ok": False, "error": f"API Error: {str(e)}"}
+        return {"ok": False, "error": str(e)}
 
 def format_api_result(data):
-    """Format API response for display"""
     if isinstance(data, dict):
-        # Check if API returned error
         if data.get("ok") is False:
             error_msg = data.get("error", "Unknown error")
             return f"❌ Error: {error_msg}"
         
-        # Check if API returned result
         if "result" in data:
             result = data["result"]
             if isinstance(result, dict):
@@ -266,7 +227,6 @@ def format_api_result(data):
             else:
                 return f"✅ Result: {result}"
         
-        # If no result key, show all data
         if data:
             formatted = "📊 API Response:\n\n"
             for key, value in data.items():
@@ -276,8 +236,6 @@ def format_api_result(data):
         return "❌ No data found"
     
     return str(data)
-
-# ========== BOT FUNCTIONS ==========
 
 def home_menu(is_owner: bool = False):
     if is_owner:
@@ -319,26 +277,32 @@ def broadcast_menu():
          InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ])
 
-# ========== COMMAND HANDLERS ==========
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     if not u:
         return
     
     register_user(u.id, u.username)
-    remaining = remaining_uses(u.id) if u.id != OWNER_ID else '♾️ Unlimited'
-    total = get_total_limits(u.id) if u.id != OWNER_ID else '♾️ Unlimited'
+    
+    # ✅ FIX: Correct remaining display
+    if u.id == OWNER_ID:
+        remaining = "♾️ Unlimited"
+        total = "♾️ Unlimited"
+        bonus = 0
+    else:
+        remaining = remaining_uses(u.id)
+        total = get_total_limits(u.id)
+        bonus = total - DAILY_LIMIT
     
     text = (
         f"👋 Hello, {u.first_name}!\n\n"
         f"📋 Daily limit: {DAILY_LIMIT} uses\n"
-        f"🎁 Bonus limits: {get_total_limits(u.id) - DAILY_LIMIT if u.id != OWNER_ID else 0}\n"
+        f"🎁 Bonus limits: {bonus if u.id != OWNER_ID else 0}\n"
         f"📊 Total available: {total}\n"
         f"✅ Remaining today: {remaining}\n\n"
         f"🔍 Use 'Search' to find phone/email details!\n"
-        f"💡 Share this bot to earn {SHARE_REWARD} extra limits per share!\n\n"
-        f"Use the buttons below to get started."
+        f"💡 Share to earn {SHARE_REWARD} extra limits per share!\n\n"
+        f"Use the buttons below."
     )
     await update.message.reply_text(text, reply_markup=home_menu(u.id == OWNER_ID))
 
@@ -350,17 +314,17 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❓ Help\n\n"
         "• 🔍 Search - Search phone/email/name\n"
         "• 📊 Limit - Check remaining uses\n"
-        "• 📢 Share & Earn - Share bot and earn extra limits\n"
+        "• 📢 Share & Earn - Share and earn extra limits\n"
         "• ℹ️ About - About this bot\n"
     )
     
     if is_owner:
-        text += "• 📈 Stats - View bot statistics (Owner only)\n"
-        text += "• 📢 Broadcast - Send message to all users (Owner only)\n"
+        text += "• 📈 Stats - View statistics (Owner only)\n"
+        text += "• 📢 Broadcast - Send to all users (Owner only)\n"
     
     text += "• 🔙 Back - Go back to home\n"
     text += "• ❌ Cancel - Cancel current operation\n\n"
-    text += f"💰 Earn {SHARE_REWARD} extra limits for each friend who joins!"
+    text += f"💰 Earn {SHARE_REWARD} extra limits per share!"
     
     if update.message:
         await update.message.reply_text(text, reply_markup=back_menu())
@@ -375,11 +339,10 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🔍 Search phone/email/name\n"
         "• 📊 Daily usage limits\n"
         "• 📢 Share & Earn rewards\n"
-        "• 📈 User statistics (Owner)\n"
-        "• 📢 Broadcast (Owner)\n"
-        "• Interactive buttons\n\n"
-        f"💰 Share Reward: {SHARE_REWARD} extra limits per share\n\n"
-        "Made with ❤️ using python-telegram-bot"
+        "• 📈 Statistics (Owner)\n"
+        "• 📢 Broadcast (Owner)\n\n"
+        f"💰 Share Reward: {SHARE_REWARD}\n\n"
+        "Made with ❤️"
     )
     if update.message:
         await update.message.reply_text(text, reply_markup=back_menu())
@@ -413,12 +376,12 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid != OWNER_ID:
         if update.message:
             await update.message.reply_text(
-                "❌ This command is only available to the bot owner.",
+                "❌ Owner only feature.",
                 reply_markup=home_menu(False)
             )
         else:
             await update.callback_query.message.reply_text(
-                "❌ This command is only available to the bot owner.",
+                "❌ Owner only feature.",
                 reply_markup=home_menu(False)
             )
         return
@@ -428,10 +391,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_today = users.count_documents({"date": today()})
         limit_hit = users.count_documents({"date": today(), "count": {"$gte": DAILY_LIMIT}})
         total_shares = users.count_documents({"shared_count": {"$gt": 0}})
-        total_bonus_given = users.aggregate([
-            {"$group": {"_id": None, "total": {"$sum": "$bonus_limits"}}}
-        ])
-        total_bonus = next(total_bonus_given, {}).get("total", 0)
         
         text = (
             "📈 Statistics (Owner Only)\n\n"
@@ -439,7 +398,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Active today: {active_today}\n"
             f"⚠️ Users at limit: {limit_hit}\n"
             f"🔄 Total shares: {total_shares}\n"
-            f"🎁 Total bonus given: {total_bonus}\n"
             f"📊 Daily limit: {DAILY_LIMIT}\n"
             f"💰 Share reward: {SHARE_REWARD}"
         )
@@ -450,11 +408,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.callback_query.message.reply_text(text, reply_markup=home_menu(True))
     except Exception as e:
         logger.error(f"Error in stats: {e}")
-        error_text = "❌ Error fetching statistics. Please try again."
-        if update.message:
-            await update.message.reply_text(error_text, reply_markup=home_menu(True))
-        else:
-            await update.callback_query.message.reply_text(error_text, reply_markup=home_menu(True))
+        await update.message.reply_text("❌ Error fetching stats.", reply_markup=home_menu(True))
 
 async def share_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -467,16 +421,16 @@ async def share_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         "📢 Share & Earn\n\n"
-        f"Share this bot and earn {SHARE_REWARD} extra limits per friend!\n\n"
+        f"Share and earn {SHARE_REWARD} extra limits per friend!\n\n"
         f"🔗 Your share link:\n"
         f"`{share_link}`\n\n"
         "📋 How it works:\n"
         "1. Share the link with friends\n"
         "2. When they join, you get extra limits\n"
         "3. Bonus limits added automatically\n\n"
-        f"💰 Current bonus: {get_total_limits(uid) - DAILY_LIMIT} extra limits\n"
+        f"💰 Current bonus: {get_total_limits(uid) - DAILY_LIMIT}\n"
         f"📊 Total available: {get_total_limits(uid)}\n\n"
-        "👆 Tap the link above to copy it!"
+        "👆 Tap to copy!"
     )
     
     await q.message.reply_text(
@@ -501,7 +455,7 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if referrer_id == u.id:
                     await update.message.reply_text(
-                        "❌ You cannot refer yourself!",
+                        "❌ Cannot refer yourself!",
                         reply_markup=home_menu(u.id == OWNER_ID)
                     )
                     return
@@ -520,38 +474,47 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logger.error(f"Could not notify referrer {referrer_id}: {e}")
                     
+                    remaining = remaining_uses(u.id)
                     text = (
                         f"👋 Welcome {u.first_name}!\n\n"
-                        f"✅ Registered successfully!\n"
-                        f"🎁 Your referrer earned {SHARE_REWARD} extra limits.\n\n"
-                        f"📋 Daily limit: {DAILY_LIMIT} uses\n"
-                        f"✅ Remaining today: {remaining_uses(u.id)}\n\n"
+                        f"✅ Registered!\n"
+                        f"🎁 Referrer earned {SHARE_REWARD} extra limits.\n\n"
+                        f"📋 Daily limit: {DAILY_LIMIT}\n"
+                        f"✅ Remaining today: {remaining}\n\n"
                         f"💡 You can also share and earn!\n\n"
-                        f"Use the buttons below to get started."
+                        f"Use the buttons below."
                     )
                     await update.message.reply_text(text, reply_markup=home_menu(u.id == OWNER_ID))
                     return
-                else:
-                    logger.error(f"Failed to add bonus to referrer {referrer_id}")
             except ValueError:
-                logger.error(f"Invalid referrer ID in referral: {ref_arg}")
+                logger.error(f"Invalid referrer ID: {ref_arg}")
     
     await start(update, context)
-
-# ========== SEARCH CONVERSATION ==========
 
 async def search_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    uid = q.from_user.id
+    
+    if uid != OWNER_ID:
+        remaining = remaining_uses(uid)
+        if remaining <= 0:
+            await q.message.reply_text(
+                f"❌ Daily limit reached!\n\n"
+                f"📊 Remaining: 0\n"
+                f"💡 Share to earn extra limits!",
+                reply_markup=home_menu(uid == OWNER_ID)
+            )
+            return ConversationHandler.END
+    
     await q.message.reply_text(
         "🔍 Send your query now.\n\n"
-        "You can search by:\n"
+        "Search by:\n"
         "• Phone number\n"
         "• Email address\n"
         "• Name\n\n"
         "Example: 9876543210 or john@email.com\n\n"
-        f"⚠️ Uses your daily limit.\n"
-        f"📊 Remaining: {remaining_uses(q.from_user.id) if q.from_user.id != OWNER_ID else '♾️ Unlimited'}\n\n"
+        f"📊 Remaining: {remaining_uses(uid) if uid != OWNER_ID else '♾️ Unlimited'}\n\n"
         "Type /cancel to cancel.",
         reply_markup=back_menu()
     )
@@ -569,11 +532,11 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_INPUT
 
-    # Check daily limit
+    # ✅ FIX: Check limit
     if not can_use(u.id):
         remaining = remaining_uses(u.id)
         await update.message.reply_text(
-            f"❌ Daily limit reached.\n\n"
+            f"❌ Daily limit reached!\n\n"
             f"📊 Remaining today: {remaining}\n"
             f"💡 Share this bot to earn extra limits!",
             reply_markup=home_menu(u.id == OWNER_ID)
@@ -581,64 +544,52 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     try:
-        msg = await update.message.reply_text("⏳ Searching... Please wait.")
-        
-        # Call API
+        msg = await update.message.reply_text("⏳ Searching...")
         result = await asyncio.to_thread(search_api, query_text)
-        
-        # Format result
         formatted_text = format_api_result(result)
         
-        # Limit message length
         if len(formatted_text) > 3900:
             formatted_text = formatted_text[:3900] + "\n\n... (truncated)"
         
         await msg.edit_text(formatted_text, reply_markup=result_menu())
         
-        # Show remaining uses
         remaining = remaining_uses(u.id)
         if remaining > 0 and u.id != OWNER_ID:
             await update.message.reply_text(
-                f"✅ Remaining uses today: {remaining}",
+                f"✅ Remaining today: {remaining}",
                 reply_markup=result_menu()
             )
             
     except Exception as e:
         logger.error(f"Error in handle_query: {e}")
         await update.message.reply_text(
-            f"❌ Error: {str(e)}\n\nPlease try again later.",
+            f"❌ Error: {str(e)}",
             reply_markup=result_menu()
         )
 
     return ConversationHandler.END
 
-# ========== BROADCAST (OWNER ONLY) ==========
-
 async def broadcast_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.from_user.id != OWNER_ID:
-        await q.message.reply_text(
-            "❌ Owner only feature.",
-            reply_markup=home_menu(False)
-        )
+        await q.message.reply_text("❌ Owner only.", reply_markup=home_menu(False))
         return ConversationHandler.END
     await q.message.reply_text(
-        "📢 Send broadcast text now.\n\n"
-        "This will be sent to all users.",
+        "📢 Send broadcast text.\n\nThis will be sent to all users.",
         reply_markup=broadcast_menu()
     )
     return WAITING_BROADCAST
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ Owner only feature.")
+        await update.message.reply_text("❌ Owner only.")
         return ConversationHandler.END
 
     text = update.message.text.strip()
     if not text:
         await update.message.reply_text(
-            "❌ Broadcast text cannot be empty.",
+            "❌ Text cannot be empty.",
             reply_markup=broadcast_menu()
         )
         return WAITING_BROADCAST
@@ -668,10 +619,7 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Error in broadcast: {e}")
-        await update.message.reply_text(
-            "❌ Error during broadcast. Please try again.",
-            reply_markup=home_menu(True)
-        )
+        await update.message.reply_text("❌ Error in broadcast.", reply_markup=home_menu(True))
     
     return ConversationHandler.END
 
@@ -692,9 +640,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def copy_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer("📋 Link copied! Share with friends.", show_alert=True)
-
-# ========== BUTTON ROUTER ==========
+    await q.answer("📋 Copied! Share with friends.", show_alert=True)
 
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -711,8 +657,8 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• ℹ️ About - About this bot\n"
         )
         if is_owner:
-            text += "• 📈 Stats - View bot statistics (Owner only)\n"
-            text += "• 📢 Broadcast - Send message to all users (Owner only)\n"
+            text += "• 📈 Stats - Statistics (Owner only)\n"
+            text += "• 📢 Broadcast - Send to all (Owner only)\n"
         text += "• 🔙 Back - Go back to home\n"
         text += "• ❌ Cancel - Cancel current operation\n\n"
         text += f"💰 Earn {SHARE_REWARD} extra limits per share!"
@@ -721,7 +667,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif q.data == "limit":
         if uid == OWNER_ID:
-            text = "👑 Owner has unlimited usage."
+            text = "👑 Unlimited usage."
         else:
             remaining = remaining_uses(uid)
             total = get_total_limits(uid)
@@ -737,10 +683,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif q.data == "stats":
         if not is_owner:
-            await q.message.reply_text(
-                "❌ Owner only feature.",
-                reply_markup=home_menu(False)
-            )
+            await q.message.reply_text("❌ Owner only.", reply_markup=home_menu(False))
             return
         
         try:
@@ -748,10 +691,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             active_today = users.count_documents({"date": today()})
             limit_hit = users.count_documents({"date": today(), "count": {"$gte": DAILY_LIMIT}})
             total_shares = users.count_documents({"shared_count": {"$gt": 0}})
-            total_bonus_given = users.aggregate([
-                {"$group": {"_id": None, "total": {"$sum": "$bonus_limits"}}}
-            ])
-            total_bonus = next(total_bonus_given, {}).get("total", 0)
             
             text = (
                 "📈 Statistics (Owner Only)\n\n"
@@ -759,17 +698,13 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Active today: {active_today}\n"
                 f"⚠️ Users at limit: {limit_hit}\n"
                 f"🔄 Total shares: {total_shares}\n"
-                f"🎁 Total bonus given: {total_bonus}\n"
                 f"📊 Daily limit: {DAILY_LIMIT}\n"
                 f"💰 Share reward: {SHARE_REWARD}"
             )
             await q.message.reply_text(text, reply_markup=home_menu(True))
         except Exception as e:
             logger.error(f"Error in stats: {e}")
-            await q.message.reply_text(
-                "❌ Error fetching statistics.",
-                reply_markup=home_menu(True)
-            )
+            await q.message.reply_text("❌ Error fetching stats.", reply_markup=home_menu(True))
     
     elif q.data == "about":
         await q.message.reply_text(
@@ -793,8 +728,13 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await copy_link_callback(update, context)
     
     elif q.data == "back":
-        remaining = remaining_uses(uid) if uid != OWNER_ID else '♾️ Unlimited'
-        total = get_total_limits(uid) if uid != OWNER_ID else '♾️ Unlimited'
+        if uid == OWNER_ID:
+            remaining = "♾️ Unlimited"
+            total = "♾️ Unlimited"
+        else:
+            remaining = remaining_uses(uid)
+            total = get_total_limits(uid)
+        
         await q.message.reply_text(
             f"🏠 Home Menu\n\n"
             f"📊 Total limits: {total}\n"
@@ -808,35 +748,26 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=home_menu(uid == OWNER_ID)
         )
 
-# ========== ERROR HANDLER ==========
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception(f"Unhandled error: {context.error}")
-    
     if update and hasattr(update, 'effective_message'):
         try:
-            await update.effective_message.reply_text(
-                "❌ An error occurred. Please try again later."
-            )
+            await update.effective_message.reply_text("❌ An error occurred. Please try again.")
         except:
             pass
 
-# ========== MAIN ==========
-
 def main():
     try:
-        print("🔄 Initializing bot...")
+        print("🔄 Starting bot...")
         app = Application.builder().token(BOT_TOKEN).build()
         print("✅ Bot initialized!")
         
-        # Command handlers
         app.add_handler(CommandHandler("start", handle_referral))
         app.add_handler(CommandHandler("help", help_cmd))
         app.add_handler(CommandHandler("limit", limit_cmd))
         app.add_handler(CommandHandler("stats", stats_cmd))
         app.add_handler(CommandHandler("about", about_cmd))
 
-        # Search conversation
         app.add_handler(ConversationHandler(
             entry_points=[CallbackQueryHandler(search_entry, pattern="^search$")],
             states={
@@ -845,7 +776,6 @@ def main():
             fallbacks=[CommandHandler("cancel", cancel), CallbackQueryHandler(cancel, pattern="^cancel$")],
         ))
 
-        # Broadcast conversation
         app.add_handler(ConversationHandler(
             entry_points=[CallbackQueryHandler(broadcast_entry, pattern="^broadcast$")],
             states={
