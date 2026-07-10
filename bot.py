@@ -77,7 +77,6 @@ def register_user(uid: int, username: str | None = None):
         {
             "$setOnInsert": {
                 "_id": uid,
-                "user_id": uid,
                 "first_seen": today(),
                 "count": 0,
                 "date": today(),
