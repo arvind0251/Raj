@@ -71,7 +71,13 @@ def can_use(user_id: int) -> bool:
     data = users.find_one({"_id": user_id})
     if not data:
         users.insert_one(
-            {"_id": user_id, "date": today(), "count": 1, "first_seen": today(), "last_seen": today()}
+            {
+                "_id": user_id,
+                "date": today(),
+                "count": 1,
+                "first_seen": today(),
+                "last_seen": today(),
+            }
         )
         return True
 
@@ -233,7 +239,11 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await asyncio.to_thread(lookup, query_text)
     text = format_result(result)
 
-    await msg.edit_text(text[:3900], reply_markup=result_menu())
+    try:
+        await msg.edit_text(text[:3900], reply_markup=result_menu())
+    except Exception:
+        await update.message.reply_text(text[:3900], reply_markup=result_menu())
+
     return ConversationHandler.END
 
 async def broadcast_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
