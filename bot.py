@@ -38,7 +38,7 @@ API_KEY = os.getenv("API_KEY", "Smoke")
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "telegram_bot")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "10"))
-SHARE_REWARD = int(os.getenv("SHARE_REWARD", "5"))  # Extra limit for sharing
+SHARE_REWARD = int(os.getenv("SHARE_REWARD", "5"))
 
 # Debug information
 print("=" * 60)
@@ -68,14 +68,11 @@ try:
     mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     db = mongo[DB_NAME]
     users = db.users
-    # Test connection
     mongo.admin.command('ping')
     print("✅ MongoDB connected successfully!")
 except ConnectionFailure as e:
     print(f"❌ ERROR: MongoDB connection failed: {e}")
     print("Please check if MongoDB is running and MONGO_URI is correct")
-    print("For local MongoDB: MONGO_URI=mongodb://localhost:27017")
-    print("For MongoDB Atlas: MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/")
     sys.exit(1)
 except Exception as e:
     print(f"❌ ERROR: MongoDB error: {e}")
@@ -84,7 +81,7 @@ except Exception as e:
 # Constants for conversation states
 WAITING_INPUT = 1
 WAITING_BROADCAST = 2
-WAITING_SHARE_USERNAME = 3
+WAITING_USER_SEARCH = 3
 
 def today():
     """Get today's date in UTC"""
@@ -102,7 +99,7 @@ def register_user(user_id: int, username: str | None = None):
                     "count": 0,
                     "date": today(),
                     "shared_count": 0,
-                    "bonus_limits": 0,  # Extra limits earned from sharing
+                    "bonus_limits": 0,
                 },
                 "$set": {
                     "username": username,
@@ -137,7 +134,6 @@ def can_use(user_id: int) -> bool:
             )
             return True
 
-        # Reset daily count if new day
         if data.get("date") != today():
             users.update_one(
                 {"_id": user_id},
@@ -146,17 +142,14 @@ def can_use(user_id: int) -> bool:
                         "date": today(), 
                         "count": 1, 
                         "last_seen": today(),
-                        # Don't reset bonus_limits, they carry over
                     }
                 }
             )
             return True
 
-        # Check if user has bonus limits (from sharing)
         bonus_limits = data.get("bonus_limits", 0)
         daily_count = data.get("count", 0)
         
-        # Check if used all daily + bonus limits
         if daily_count >= (DAILY_LIMIT + bonus_limits):
             return False
 
@@ -181,7 +174,6 @@ def remaining_uses(user_id: int) -> int:
         bonus_limits = data.get("bonus_limits", 0)
         daily_count = data.get("count", 0)
         
-        # If new day, reset count but keep bonus
         if data.get("date") != today():
             return DAILY_LIMIT + bonus_limits
             
@@ -222,6 +214,47 @@ def add_bonus_limits(user_id: int, amount: int) -> bool:
         logger.error(f"Error adding bonus limits to {user_id}: {e}")
         return False
 
+def search_user_by_username(username: str):
+    """Search user by username"""
+    try:
+        username = username.replace('@', '').strip()
+        user = users.find_one({"username": username})
+        if user:
+            return {
+                "found": True,
+                "user_id": user.get("_id"),
+                "username": user.get("username"),
+                "first_seen": user.get("first_seen"),
+                "last_seen": user.get("last_seen"),
+                "count": user.get("count", 0),
+                "bonus_limits": user.get("bonus_limits", 0),
+                "shared_count": user.get("shared_count", 0)
+            }
+        return {"found": False}
+    except Exception as e:
+        logger.error(f"Error searching user by username: {e}")
+        return {"found": False, "error": str(e)}
+
+def search_user_by_id(user_id: int):
+    """Search user by user ID"""
+    try:
+        user = users.find_one({"_id": user_id})
+        if user:
+            return {
+                "found": True,
+                "user_id": user.get("_id"),
+                "username": user.get("username"),
+                "first_seen": user.get("first_seen"),
+                "last_seen": user.get("last_seen"),
+                "count": user.get("count", 0),
+                "bonus_limits": user.get("bonus_limits", 0),
+                "shared_count": user.get("shared_count", 0)
+            }
+        return {"found": False}
+    except Exception as e:
+        logger.error(f"Error searching user by ID: {e}")
+        return {"found": False, "error": str(e)}
+
 def lookup(query: str):
     """Query the API"""
     try:
@@ -247,18 +280,17 @@ def format_result(result):
 def home_menu(is_owner: bool = False):
     """Create home menu keyboard - Stats only for owner"""
     if is_owner:
-        # Owner menu with Stats and Broadcast
         rows = [
             [InlineKeyboardButton("🔍 Search", callback_data="search"), 
-             InlineKeyboardButton("📊 Limit", callback_data="limit")],
-            [InlineKeyboardButton("📢 Share & Earn", callback_data="share")],
+             InlineKeyboardButton("👤 User Search", callback_data="user_search")],
+            [InlineKeyboardButton("📊 Limit", callback_data="limit"), 
+             InlineKeyboardButton("📢 Share & Earn", callback_data="share")],
             [InlineKeyboardButton("📈 Stats", callback_data="stats"), 
              InlineKeyboardButton("📢 Broadcast", callback_data="broadcast")],
             [InlineKeyboardButton("❓ Help", callback_data="help"), 
              InlineKeyboardButton("ℹ️ About", callback_data="about")],
         ]
     else:
-        # Normal user menu - No Stats button
         rows = [
             [InlineKeyboardButton("🔍 Search", callback_data="search"), 
              InlineKeyboardButton("📊 Limit", callback_data="limit")],
@@ -319,13 +351,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         "❓ Help\n\n"
-        "• 🔍 Search - Look up information\n"
+        "• 🔍 Search - Look up phone/email/name\n"
         "• 📊 Limit - Check remaining uses\n"
         "• 📢 Share & Earn - Share bot and earn extra limits\n"
         "• ℹ️ About - About this bot\n"
     )
     
     if is_owner:
+        text += "• 👤 User Search - Search user by username or ID (Owner only - No limit)\n"
         text += "• 📈 Stats - View bot statistics (Owner only)\n"
         text += "• 📢 Broadcast - Send message to all users (Owner only)\n"
     
@@ -346,6 +379,7 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• MongoDB database\n"
         "• Daily usage limits\n"
         "• Share & Earn rewards\n"
+        "• User search (Owner)\n"
         "• User statistics\n"
         "• Interactive buttons\n\n"
         f"💰 Share Reward: {SHARE_REWARD} extra limits per share\n\n"
@@ -382,7 +416,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stats command - Only for owner"""
     uid = update.effective_user.id
     
-    # Check if user is owner
     if uid != OWNER_ID:
         if update.message:
             await update.message.reply_text(
@@ -435,11 +468,8 @@ async def share_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid = q.from_user.id
     
-    # Get bot username
     bot_info = await context.bot.get_me()
     bot_username = bot_info.username
-    
-    # Create share link
     share_link = f"https://t.me/{bot_username}?start=ref_{uid}"
     
     text = (
@@ -471,14 +501,12 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not u:
         return
     
-    # Check if this is a referral
     if context.args and len(context.args) > 0:
         ref_arg = context.args[0]
         if ref_arg.startswith("ref_"):
             try:
                 referrer_id = int(ref_arg.replace("ref_", ""))
                 
-                # Don't allow self-referral
                 if referrer_id == u.id:
                     await update.message.reply_text(
                         "❌ You cannot refer yourself!",
@@ -486,12 +514,9 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
                 
-                # Register the new user first
                 register_user(u.id, u.username)
                 
-                # Add bonus to referrer
                 if add_bonus_limits(referrer_id, SHARE_REWARD):
-                    # Notify referrer
                     try:
                         await context.bot.send_message(
                             chat_id=referrer_id,
@@ -503,7 +528,6 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logger.error(f"Could not notify referrer {referrer_id}: {e}")
                     
-                    # Notify new user about the reward
                     text = (
                         f"👋 Welcome {u.first_name}!\n\n"
                         f"✅ You've been successfully registered!\n"
@@ -520,23 +544,26 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 logger.error(f"Invalid referrer ID in referral: {ref_arg}")
     
-    # Normal start (no referral or invalid referral)
     await start(update, context)
 
-# Conversation Handlers for Search
+# Search Conversation (Normal Search)
 async def search_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start search conversation"""
     q = update.callback_query
     await q.answer()
     await q.message.reply_text(
         "🔍 Send your query now.\n\n"
-        "Example: phone number, email, or name",
+        "You can search by:\n"
+        "• Phone number\n"
+        "• Email address\n"
+        "• Name\n\n"
+        "Example: 9876543210 or john@email.com",
         reply_markup=back_menu()
     )
     return WAITING_INPUT
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle search query"""
+    """Handle search query - Uses daily limit"""
     u = update.effective_user
     register_user(u.id, u.username)
 
@@ -548,6 +575,7 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_INPUT
 
+    # Check daily limit for normal search
     if not can_use(u.id):
         remaining = remaining_uses(u.id)
         await update.message.reply_text(
@@ -563,13 +591,11 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await asyncio.to_thread(lookup, query_text)
         text = format_result(result)
 
-        # Limit message length to 4000 characters (Telegram limit)
         if len(text) > 3900:
             text = text[:3900] + "\n\n... (truncated)"
         
         await msg.edit_text(text, reply_markup=result_menu())
         
-        # Show remaining uses after search
         remaining = remaining_uses(u.id)
         if remaining > 0:
             await update.message.reply_text(
@@ -583,6 +609,98 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=result_menu()
         )
 
+    return ConversationHandler.END
+
+# User Search (Owner Only - No Limit)
+async def user_search_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start user search conversation - Owner only - No limit"""
+    q = update.callback_query
+    await q.answer()
+    
+    if q.from_user.id != OWNER_ID:
+        await q.message.reply_text(
+            "❌ This feature is only available to the bot owner.",
+            reply_markup=home_menu(False)
+        )
+        return ConversationHandler.END
+    
+    await q.message.reply_text(
+        "👤 Search User\n\n"
+        "Send the username or user ID to search.\n\n"
+        "Examples:\n"
+        "• Username: @john_doe or john_doe\n"
+        "• User ID: 123456789\n\n"
+        "ℹ️ This feature has NO daily limit.\n\n"
+        "Type /cancel to cancel.",
+        reply_markup=back_menu()
+    )
+    return WAITING_USER_SEARCH
+
+async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle user search - Owner only - No limit check"""
+    uid = update.effective_user.id
+    
+    # Check if owner
+    if uid != OWNER_ID:
+        await update.message.reply_text(
+            "❌ This feature is only available to the bot owner.",
+            reply_markup=home_menu(False)
+        )
+        return ConversationHandler.END
+    
+    # NO LIMIT CHECK FOR USER SEARCH - Owner can search unlimited times
+    
+    query = update.message.text.strip()
+    if not query:
+        await update.message.reply_text(
+            "❌ Please send a valid username or user ID.",
+            reply_markup=back_menu()
+        )
+        return WAITING_USER_SEARCH
+    
+    try:
+        # Try to search by user ID (if query is numeric)
+        if query.isdigit():
+            result = search_user_by_id(int(query))
+        else:
+            # Search by username
+            result = search_user_by_username(query)
+        
+        if result.get("found"):
+            user_data = result
+            text = (
+                "👤 User Found\n\n"
+                f"🆔 User ID: `{user_data['user_id']}`\n"
+                f"👤 Username: @{user_data['username'] if user_data['username'] else 'N/A'}\n"
+                f"📅 First Seen: {user_data['first_seen']}\n"
+                f"🔄 Last Seen: {user_data['last_seen']}\n"
+                f"📊 Total Uses: {user_data['count']}\n"
+                f"🎁 Bonus Limits: {user_data['bonus_limits']}\n"
+                f"📢 Total Shares: {user_data['shared_count']}\n"
+                f"📋 Daily Limit: {DAILY_LIMIT}\n"
+                f"✅ Remaining Today: {remaining_uses(user_data['user_id'])}"
+            )
+            await update.message.reply_text(
+                text,
+                reply_markup=back_menu(),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ User not found: {query}\n\n"
+                "Please check the username or user ID and try again.",
+                reply_markup=back_menu()
+            )
+            return WAITING_USER_SEARCH
+            
+    except Exception as e:
+        logger.error(f"Error in user search: {e}")
+        await update.message.reply_text(
+            "❌ Error searching user. Please try again.",
+            reply_markup=back_menu()
+        )
+        return WAITING_USER_SEARCH
+    
     return ConversationHandler.END
 
 # Broadcast Handlers (Owner only)
@@ -629,7 +747,7 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=doc["_id"], text=text)
                 sent += 1
-                await asyncio.sleep(0.1)  # Rate limiting
+                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Failed to send to {doc['_id']}: {e}")
                 failed += 1
@@ -681,12 +799,13 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "help":
         text = (
             "❓ Help\n\n"
-            "• 🔍 Search - Look up information\n"
+            "• 🔍 Search - Look up phone/email/name\n"
             "• 📊 Limit - Check remaining uses\n"
             "• 📢 Share & Earn - Share bot and earn extra limits\n"
             "• ℹ️ About - About this bot\n"
         )
         if is_owner:
+            text += "• 👤 User Search - Search user by username or ID (Owner only - No limit)\n"
             text += "• 📈 Stats - View bot statistics (Owner only)\n"
             text += "• 📢 Broadcast - Send message to all users (Owner only)\n"
         text += "• 🔙 Back - Go back to home\n"
@@ -712,7 +831,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(text, reply_markup=back_menu())
     
     elif q.data == "stats":
-        # Only owner can access stats
         if not is_owner:
             await q.message.reply_text(
                 "❌ This feature is only available to the bot owner.",
@@ -755,6 +873,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• MongoDB database\n"
             "• Daily usage limits\n"
             "• Share & Earn rewards\n"
+            "• User search (Owner)\n"
             "• User statistics\n"
             "• Interactive buttons\n\n"
             f"💰 Share Reward: {SHARE_REWARD} extra limits per share\n\n"
@@ -789,7 +908,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     logger.exception(f"Unhandled error: {context.error}")
     
-    # Send error message to user if possible
     if update and hasattr(update, 'effective_message'):
         try:
             await update.effective_message.reply_text(
@@ -813,11 +931,20 @@ def main():
         app.add_handler(CommandHandler("stats", stats_cmd))
         app.add_handler(CommandHandler("about", about_cmd))
 
-        # Search conversation
+        # Search conversation (Normal search - with limit)
         app.add_handler(ConversationHandler(
             entry_points=[CallbackQueryHandler(search_entry, pattern="^search$")],
             states={
                 WAITING_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query)]
+            },
+            fallbacks=[CommandHandler("cancel", cancel), CallbackQueryHandler(cancel, pattern="^cancel$")],
+        ))
+
+        # User Search conversation (Owner only - NO limit)
+        app.add_handler(ConversationHandler(
+            entry_points=[CallbackQueryHandler(user_search_entry, pattern="^user_search$")],
+            states={
+                WAITING_USER_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_search)]
             },
             fallbacks=[CommandHandler("cancel", cancel), CallbackQueryHandler(cancel, pattern="^cancel$")],
         ))
